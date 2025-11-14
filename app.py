@@ -1,599 +1,621 @@
 import json
-from datetime import datetime, date, timedelta
+import random
+from datetime import date, datetime, timedelta
 from statistics import mean
 
 import streamlit as st
 from openai import OpenAI
 
-# ---------- CONFIG BÁSICA ----------
+# ==========================================
+# CONFIG STREAMLIT
+# ==========================================
 st.set_page_config(
-    page_title="ContentForge v9.3",
+    page_title="ContentForge v9.5",
     page_icon="🍏",
     layout="wide",
 )
 
-# ---------- CLIENTE OPENAI ----------
-# Usa a OPENAI_API_KEY definida nas variáveis de ambiente / st.secrets
+# ==========================================
+# OPENAI CLIENT (usa OPENAI_API_KEY do ambiente / secrets)
+# ==========================================
 client = OpenAI()
 
 
-# ---------- STATE INIT ----------
+# ==========================================
+# ESTADO GLOBAL
+# ==========================================
 def init_state():
+    # Plano atual
     if "plan" not in st.session_state:
-        st.session_state.plan = "Starter"
+        st.session_state.plan = "Pro"
 
-    if "gens_used_date" not in st.session_state:
-        st.session_state.gens_used_date = date.today().isoformat()
-
-    if "gens_used_today" not in st.session_state:
+    # Contador de gerações por dia
+    today_str = date.today().isoformat()
+    if "gens_date" not in st.session_state:
+        st.session_state.gens_date = today_str
         st.session_state.gens_used_today = 0
+    else:
+        # se mudou o dia, reset
+        if st.session_state.gens_date != today_str:
+            st.session_state.gens_date = today_str
+            st.session_state.gens_used_today = 0
 
-    if "tasks" not in st.session_state:
-        st.session_state.tasks = []
+    # Últimas variações geradas (para não desaparecerem ao mudar de aba)
+    if "last_variations" not in st.session_state:
+        # lista de dicts: {titulo, legenda, hashtags, plataforma}
+        st.session_state.last_variations = None
+
+    # Planner: lista de tarefas
+    if "planner" not in st.session_state:
+        # cada tarefa:
+        # {id, titulo, legenda, hashtags, plataforma, dia(YYYY-MM-DD), hora(HH:MM), score, status}
+        st.session_state.planner = []
 
     if "next_task_id" not in st.session_state:
         st.session_state.next_task_id = 1
 
-    if "planner_anchor" not in st.session_state:
-        st.session_state.planner_anchor = date.today()
-
     if "selected_task_id" not in st.session_state:
         st.session_state.selected_task_id = None
 
-    if "active_page" not in st.session_state:
-        st.session_state.active_page = "gerar"
+
+def limits_for_plan(plan: str) -> int:
+    """Limite de gerações por dia conforme plano."""
+    if plan == "Starter":
+        return 5
+    if plan == "Pro":
+        return 50
+    return 5
 
 
-init_state()
+# ==========================================
+# HELPERS DE NEGÓCIO
+# ==========================================
+def emoji_for_niche(niche: str) -> str:
+    n = (niche or "").lower()
+    if "moda" in n or "roupa" in n or "vestuário" in n:
+        return "👗"
+    if "fitness" in n or "ginásio" in n or "gym" in n:
+        return "💪"
+    if "restaurante" in n or "comida" in n or "food" in n:
+        return "🍽️"
+    if "fornecedor" in n or "wholesale" in n:
+        return "📦"
+    if "beleza" in n or "cosmética" in n or "make" in n:
+        return "💄"
+    return "✨"
 
 
-# ---------- HELPERS GERAIS ----------
-def reset_daily_generations_if_needed():
-    today_str = date.today().isoformat()
-    if st.session_state.gens_used_date != today_str:
-        st.session_state.gens_used_date = today_str
-        st.session_state.gens_used_today = 0
-
-
-def get_daily_limit(plan: str) -> int:
-    return 5 if plan == "Starter" else 9999
-
-
-def add_emoji_to_title(title: str, tema: str) -> str:
-    """Garante 1 emoji no início do título, em sintonia com o tema."""
-    # Se já tiver emoji nos primeiros caracteres, não mexe
-    if any(ch in title[:4] for ch in "✨💫🔥🍂🌟💄💅💎💸🎁🏷️"):
+def add_emoji_to_title(title: str, niche: str) -> str:
+    title = (title or "").strip()
+    if not title:
         return title
-
-    lower = (title + " " + tema).lower()
-    if any(x in lower for x in ["desconto", "%", "promo", "oferta"]):
-        emoji = "💸"
-    elif any(x in lower for x in ["outono", "outono", "fall"]):
-        emoji = "🍂"
-    elif any(x in lower for x in ["luxo", "premium", "exclusivo"]):
-        emoji = "💎"
-    elif any(x in lower for x in ["novo", "lançamento", "lancamento"]):
-        emoji = "✨"
-    else:
-        emoji = "🌟"
-
-    return f"{emoji} {title.strip()}"
+    # Se já começa com emoji, não mexer
+    if title[0] in "✨👗💪🍽️📦💄🔥⭐🏆🌟🎯🍂":
+        return title
+    return f"{emoji_for_niche(niche)} {title}"
 
 
-def simple_analysis(caption: str, platform: str) -> dict:
-    """Cria uma análise simples mas consistente da legenda."""
-    length = len(caption)
+def fake_analysis(caption: str, hashtags: list[str]):
+    """
+    Análise automática fake mas estável e credível.
+    Usa comprimento do texto + nº de hashtags para dar score.
+    """
+    words = len((caption or "").split())
+    base = 7.0 + min(2.0, max(0, (words - 40) / 40))  # 7–9
+    extra_hash = min(0.6, len(hashtags) * 0.03)
 
-    # Clareza
-    if length < 200:
-        clareza = 8.0
-    elif length < 400:
-        clareza = 7.5
-    else:
-        clareza = 7.0
+    # jitter pequeno mas estável
+    seed = abs(hash(caption)) % 1000
+    random.seed(seed)
+    jitter = random.uniform(-0.3, 0.3)
 
-    # Emojis e engajamento
-    emoji_count = sum(ch in caption for ch in "✨💫🔥🍂🌟💄💅💎💸🎁🏷️😍❤️💖💥😮😁🤩🎉🎊")
-    engaj = 6.0 + min(emoji_count * 0.3, 3.0)
-
-    # Conversão
-    conv = 6.5
-    gatilhos = ["10%", "desconto", "% off", "link na bio", "visita o site", "shop"]
-    if any(g.lower() in caption.lower() for g in gatilhos):
-        conv += 1.5
-    if "até domingo" in caption.lower():
-        conv += 0.5
-
-    # Ajuste por plataforma
-    if platform.lower() == "tiktok":
-        engaj += 0.4
-    else:
-        conv += 0.3
-
-    clareza = round(min(clareza, 10), 1)
-    engaj = round(min(engaj, 10), 1)
-    conv = round(min(conv, 10), 1)
-    score = round(mean([clareza, engaj, conv]), 1)
+    score_final = max(6.0, min(9.5, base + extra_hash + jitter))
+    eng = max(6.0, min(9.5, base - 0.2 + random.uniform(-0.3, 0.3)))
+    conv = max(6.0, min(9.5, base + 0.1 + random.uniform(-0.3, 0.3)))
 
     return {
-        "clareza": clareza,
-        "engaj": engaj,
-        "conv": conv,
-        "score": score,
+        "score": round(score_final, 1),
+        "engaj": round(eng, 1),
+        "conv": round(conv, 1),
     }
 
 
-def format_time_str(time_str: str) -> str:
-    """HH:MM -> HH:MM (garante formato correcto)."""
-    try:
-        return datetime.strptime(time_str, "%H:%M").strftime("%H:%M")
-    except Exception:
-        return "18:00"
-
-
-def parse_time_to_minutes(time_str: str) -> int:
-    try:
-        t = datetime.strptime(time_str, "%H:%M")
-        return t.hour * 60 + t.minute
-    except Exception:
-        return 18 * 60
-
-
-def minutes_to_time_str(minutes: int) -> str:
-    h = minutes // 60
-    m = minutes % 60
-    return f"{h:02d}:{m:02d}"
-
-
-# ---------- GERAÇÃO COM OPENAI ----------
-def generate_variations(
-    marca: str,
-    nicho: str,
-    tom: str,
-    modo_copy: str,
-    plataforma: str,
-    objetivo: str,
+def call_openai_variations(
+    platform: str,
+    brand: str,
+    niche: str,
+    tone: str,
+    mode: str,
+    message: str,
     extra: str,
 ):
-    prompt_system = (
-        "És um copywriter de social media de alto nível. "
-        "Responde SEMPRE em JSON válido, no seguinte formato:\n\n"
-        "{\n"
-        '  "variations": [\n'
-        "    {\n"
-        '      "title": "string",\n'
-        '      "caption": "string",\n'
-        '      "hashtags": ["#tag1", "#tag2", "..."]\n'
-        "    }, ...\n"
-        "  ]\n"
-        "}\n\n"
-        "Titulos curtos. Legendas em PT-PT, com emojis naturais. "
-        "Hashtags em minúsculas, sem acentos."
-    )
+    """
+    Pede 3 variações à OpenAI e devolve:
+    (lista_de_variacoes, erro_str_ou_None)
 
+    variacao = {titulo, legenda, hashtags, plataforma}
+    """
     user_prompt = f"""
-Marca: {marca}
-Nicho: {nicho}
-Tom de voz: {tom}
-Modo de copy: {modo_copy}
-Plataforma: {plataforma}
+Marca: {brand}
+Nicho/tema: {niche}
+Plataforma: {platform}
+Tom de voz: {tone}
+Modo de copy: {mode}
 
 O que quero comunicar hoje:
-{objetivo}
+\"\"\"{message}\"\"\"
 
 Informação extra:
-{extra}
+\"\"\"{extra}\"\"\"
 
-Gera exatamente 3 variações diferentes, todas focadas em venda suave,
-com CTA claro para visitar site/perfil/comprar.
-"""
+Gera 3 variações de conteúdo para {platform}, em português de Portugal.
+
+Cada variação deve ter:
+- "titulo": título curto (máx. 80 caracteres), sem emojis
+- "legenda": copy principal (70–160 palavras), com CTA claro
+- "hashtags": lista com 8–15 hashtags relevantes (strings começadas por #, minúsculas, sem acentos)
+
+Responde EXATAMENTE neste formato JSON:
+
+{{
+  "variacoes": [
+    {{
+      "titulo": "...",
+      "legenda": "...",
+      "hashtags": ["#...", "#..."]
+    }},
+    {{
+      "titulo": "...",
+      "legenda": "...",
+      "hashtags": ["#...", "#..."]
+    }},
+    {{
+      "titulo": "...",
+      "legenda": "...",
+      "hashtags": ["#...", "#..."]
+    }}
+  ]
+}}
+    """.strip()
 
     try:
-        response = client.chat.completions.create(
+        completion = client.chat.completions.create(
             model="gpt-4o-mini",
-            temperature=0.9,
-            max_tokens=900,
+            response_format={"type": "json_object"},
             messages=[
-                {"role": "system", "content": prompt_system},
+                {
+                    "role": "system",
+                    "content": (
+                        "És um copywriter especialista em redes sociais. "
+                        "Escreves em português de Portugal, focado em venda suave, "
+                        "credibilidade e emoção. Responde sempre em JSON válido."
+                    ),
+                },
                 {"role": "user", "content": user_prompt},
             ],
         )
+        raw = completion.choices[0].message.content
+        data = json.loads(raw)
+        vs = data.get("variacoes", [])
+        out = []
+        for v in vs[:3]:
+            titulo = (v.get("titulo") or "").strip()
+            legenda = (v.get("legenda") or "").strip()
+            hashtags = v.get("hashtags") or []
+            if not isinstance(hashtags, list):
+                hashtags = []
+            hashtags = [h.strip() for h in hashtags if isinstance(h, str) and h.strip()]
 
-        content = response.choices[0].message.content
-        data = json.loads(content)
+            if not titulo or not legenda:
+                continue
 
-        variations = data.get("variations", [])
-        cleaned = []
-        for var in variations[:3]:
-            title = var.get("title", "").strip()
-            caption = var.get("caption", "").strip()
-            hashtags = var.get("hashtags", [])
-            if isinstance(hashtags, str):
-                hashtags = hashtags.split()
-
-            cleaned.append(
+            out.append(
                 {
-                    "title": title,
-                    "caption": caption,
+                    "titulo": titulo,
+                    "legenda": legenda,
                     "hashtags": hashtags,
+                    "plataforma": platform,
                 }
             )
-        return cleaned
-
+        if not out:
+            return None, "A resposta da IA veio vazia ou num formato inesperado."
+        return out, None
     except Exception as e:
-        st.error("❌ Não consegui interpretar a resposta da API. Tenta novamente.")
-        st.write(e)
-        return []
+        return None, f"Erro ao falar com a API: {e}"
 
 
-# ---------- SIDEBAR ----------
+def add_task_to_planner(variation: dict, day: date, time_obj, niche: str):
+    """Adiciona uma tarefa ao planner e devolve o score."""
+    task_id = st.session_state.next_task_id
+    st.session_state.next_task_id += 1
+
+    titulo = add_emoji_to_title(variation["titulo"], niche)
+    legenda = variation["legenda"]
+    hashtags = variation["hashtags"]
+    platform = variation["plataforma"]
+
+    analysis = fake_analysis(legenda, hashtags)
+    score = analysis["score"]
+
+    st.session_state.planner.append(
+        {
+            "id": task_id,
+            "titulo": titulo,
+            "legenda": legenda,
+            "hashtags": hashtags,
+            "plataforma": platform,
+            "dia": day.isoformat(),
+            "hora": time_obj.strftime("%H:%M"),
+            "score": score,
+            "status": "planned",
+        }
+    )
+    return score
+
+
+# ==========================================
+# SIDEBAR
+# ==========================================
 def sidebar():
-    st.sidebar.markdown("## Plano e perfil")
+    st.sidebar.title("Plano & Perfil")
 
-    plan = st.sidebar.selectbox("Plano", ["Starter", "Pro"], key="plan")
+    # Plano
+    plan = st.sidebar.selectbox(
+        "Plano",
+        ["Starter", "Pro"],
+        index=1 if st.session_state.plan == "Pro" else 0,
+    )
+    st.session_state.plan = plan
 
-    reset_daily_generations_if_needed()
-    limit = get_daily_limit(plan)
+    limit_per_day = limits_for_plan(plan)
+    used_today = st.session_state.gens_used_today
     st.sidebar.markdown(
-        f"**Gerações usadas hoje:** {st.session_state.gens_used_today}/{limit}"
+        f"**Gerações usadas hoje:** {used_today}/{limit_per_day}"
     )
 
     st.sidebar.markdown("---")
 
-    marca = st.sidebar.text_input("Marca", value="Loukisses")
-    nicho = st.sidebar.text_input("Nicho/tema", value="Moda feminina")
-    tom = st.sidebar.selectbox("Tom de voz", ["premium", "emocional", "profissional"])
-    modo_copy = st.sidebar.selectbox(
-        "Modo de copy", ["Venda", "Storytelling", "Educacional"]
+    brand = st.sidebar.text_input("Marca", "Loukisses")
+    niche = st.sidebar.text_input("Nicho/tema", "Moda feminina")
+    tone = st.sidebar.selectbox(
+        "Tom de voz",
+        ["profissional", "premium", "emocional", "descontraído"],
+        index=1,
+    )
+    mode = st.sidebar.selectbox(
+        "Modo de copy",
+        ["Venda", "Storytelling", "Educacional"],
+        index=0,
     )
 
     st.sidebar.markdown("---")
-    st.sidebar.markdown("**Métricas da conta (simuladas)**")
-
-    seguidores = st.sidebar.number_input("Seguidores", min_value=0, value=1200, step=50)
-    engaj_percent = st.sidebar.number_input(
-        "Engaj. %", min_value=0.0, value=3.4, step=0.1
+    st.sidebar.caption("Métricas da conta (simuladas por enquanto)")
+    followers = st.sidebar.number_input("Seguidores", min_value=0, value=1200, step=50)
+    engagement_pct = st.sidebar.number_input(
+        "Engaj. %", min_value=0.0, value=3.4, step=0.1, format="%.1f"
     )
-    alcance_medio = st.sidebar.number_input(
+    avg_reach = st.sidebar.number_input(
         "Alcance médio", min_value=0, value=1400, step=50
     )
 
     return {
         "plan": plan,
-        "marca": marca,
-        "nicho": nicho,
-        "tom": tom,
-        "modo_copy": modo_copy,
-        "seguidores": seguidores,
-        "engaj_percent": engaj_percent,
-        "alcance_medio": alcance_medio,
+        "limit_per_day": limit_per_day,
+        "brand": brand,
+        "niche": niche,
+        "tone": tone,
+        "mode": mode,
+        "followers": followers,
+        "engagement_pct": engagement_pct,
+        "avg_reach": avg_reach,
     }
 
 
-# ---------- NAV ----------
-def nav():
-    page = st.radio(
-        "",
-        ["⚡ Gerar", "📅 Planner", "📊 Performance"],
-        horizontal=True,
-        index=["gerar", "planner", "performance"].index(st.session_state.active_page),
-        label_visibility="collapsed",
+# ==========================================
+# PÁGINA: GERAR
+# ==========================================
+def page_generate(ctx):
+    st.subheader("⚡ Geração inteligente de conteúdo")
+
+    platform = st.selectbox("Plataforma", ["Instagram", "TikTok"], index=0)
+    message = st.text_input(
+        "O que queres comunicar hoje?",
+        "Lançamento da nova coleção de Outono.",
     )
-    mapping = {"⚡ Gerar": "gerar", "📅 Planner": "planner", "📊 Performance": "performance"}
-    st.session_state.active_page = mapping[page]
+    extra = st.text_area(
+        "Informação extra (opcional)",
+        "Desconto de 10% no site até domingo.",
+    )
 
+    used = st.session_state.gens_used_today
+    limit = ctx["limit_per_day"]
+    disabled = used >= limit
 
-# ---------- PÁGINA GERAR ----------
-def page_gerar(ctx):
-    st.markdown("### ⚡ Geração inteligente de conteúdo")
+    if disabled:
+        st.warning("Limite de gerações diárias atingido para o teu plano.")
 
-    plataforma = st.selectbox("Plataforma", ["Instagram", "Tiktok"])
-    objetivo = st.text_input("O que queres comunicar hoje?")
-    extra = st.text_area("Informação extra (opcional)")
+    generate_clicked = st.button(
+        "🚀 Gerar agora",
+        disabled=disabled,
+        use_container_width=True,
+    )
 
-    plan = ctx["plan"]
-    limit = get_daily_limit(plan)
-    btn_disabled = st.session_state.gens_used_today >= limit
-
-    if btn_disabled:
-        st.warning("Limite diário de gerações atingido para este plano.")
-    gerar = st.button("⚡ Gerar agora", disabled=btn_disabled)
-
-    results = []
-
-    if gerar:
+    # SE CLICOU EM GERAR
+    if generate_clicked and not disabled:
         with st.spinner("A pensar na melhor legenda para ti..."):
-            variations = generate_variations(
-                ctx["marca"],
-                ctx["nicho"],
-                ctx["tom"],
-                ctx["modo_copy"],
-                plataforma,
-                objetivo,
+            variations, err = call_openai_variations(
+                platform,
+                ctx["brand"],
+                ctx["niche"],
+                ctx["tone"],
+                ctx["mode"],
+                message,
                 extra,
             )
-
-        if variations:
+        if err:
+            st.error(err)
+        else:
+            # guarda variações no estado para não desaparecerem ao mudar de aba
+            st.session_state.last_variations = variations
+            # incrementa créditos
             st.session_state.gens_used_today += 1
+            st.success("✨ Conteúdo gerado com sucesso!")
 
-            # Análise + emojis
-            for var in variations:
-                title_raw = var["title"] or "Legenda"
-                title = add_emoji_to_title(title_raw, ctx["nicho"])
-                caption = var["caption"]
-                hashtags = var["hashtags"]
+    # VARIAÇÕES A MOSTRAR (últimas geradas)
+    variations = st.session_state.last_variations
 
-                analysis = simple_analysis(caption, plataforma)
-                results.append(
-                    {
-                        "title": title,
-                        "caption": caption,
-                        "hashtags": hashtags,
-                        "analysis": analysis,
-                    }
-                )
+    if not variations:
+        st.info("Gera conteúdo para ver as sugestões aqui.")
+        return
 
-    if results:
-        st.success("✅ Conteúdo gerado com sucesso!")
+    # Análise e recomendação
+    analyses = [fake_analysis(v["legenda"], v["hashtags"]) for v in variations]
+    best_idx = max(range(len(analyses)), key=lambda i: analyses[i]["score"])
 
-        # Escolher recomendação Pro
-        best_idx = max(range(len(results)), key=lambda i: results[i]["analysis"]["score"])
+    col1, col2, col3 = st.columns(3)
+    cols = [col1, col2, col3]
 
-        cols = st.columns(3)
-        for i, (col, res) in enumerate(zip(cols, results)):
-            with col:
-                is_best = i == best_idx and ctx["plan"] == "Pro"
-
-                if is_best:
-                    st.markdown("🟡 **Nossa recomendação**")
-
-                st.markdown(f"**{res['title']}**")
-                st.write(res["caption"])
-
-                if res["hashtags"]:
-                    st.markdown("**Hashtags sugeridas:**")
-                    st.write(" ".join(res["hashtags"]))
-
-                a = res["analysis"]
-                if ctx["plan"] == "Pro":
-                    st.markdown(
-                        f"**Análise automática (Pro):** 🧠 Score {a['score']}/10 · 💬 Engaj. {a['engaj']}/10 · 💰 Conv. {a['conv']}/10"
-                    )
-                else:
-                    st.markdown(
-                        "**Análise automática (Pro):** 🔒 Pré-visualização — disponível no plano Pro."
-                    )
-
-                st.markdown("---")
-                # Inputs para planner
-                dia = st.date_input(
-                    "Dia",
-                    value=date.today(),
-                    key=f"dia_{i}",
-                )
-                hora = st.time_input(
-                    "Hora",
-                    value=datetime.strptime("18:00", "%H:%M").time(),
-                    key=f"hora_{i}",
-                )
-
-                if st.button("➕ Adicionar ao planner", key=f"add_planner_{i}"):
-                    task = {
-                        "id": st.session_state.next_task_id,
-                        "date": dia,
-                        "time": hora.strftime("%H:%M"),
-                        "platform": plataforma,
-                        "title": res["title"],
-                        "caption": res["caption"],
-                        "hashtags": res["hashtags"],
-                        "score": res["analysis"]["score"],
-                        "status": "planned",
-                        "created_at": datetime.now(),
-                    }
-                    st.session_state.next_task_id += 1
-                    st.session_state.tasks.append(task)
-                    st.success("Post adicionado ao planner!")
-
-    elif gerar and not results:
-        st.info("Tenta gerar novamente. Pode ter havido um erro de resposta da API.")
-
-
-# ---------- PÁGINA PLANNER ----------
-def get_week_range(anchor: date):
-    # devolve segunda a domingo da semana da âncora
-    weekday = anchor.weekday()  # 0 = Monday
-    monday = anchor - timedelta(days=weekday)
-    days = [monday + timedelta(days=i) for i in range(7)]
-    return days
-
-
-def page_planner(ctx):
-    st.markdown("### 📅 Planner semanal")
-
-    col_prev, col_anchor, col_next = st.columns([1, 3, 1])
-    with col_prev:
-        if st.button("« Semana anterior"):
-            st.session_state.planner_anchor -= timedelta(days=7)
-    with col_anchor:
-        st.date_input(
-            "Semana de referência",
-            value=st.session_state.planner_anchor,
-            key="planner_anchor_input",
-        )
-        # Se o user mexer manualmente, actualizar
-        anchor_input = st.session_state.planner_anchor_input
-        if anchor_input != st.session_state.planner_anchor:
-            st.session_state.planner_anchor = anchor_input
-    with col_next:
-        if st.button("Semana seguinte »"):
-            st.session_state.planner_anchor += timedelta(days=7)
-
-    days = get_week_range(st.session_state.planner_anchor)
-    st.markdown(
-        f"Semana de {days[0].strftime('%d/%m')} a {days[-1].strftime('%d/%m')}"
-    )
-
-    # Grid semanal
-    cols = st.columns(7)
-    for day, col in zip(days, cols):
+    for idx, (col, var, ana) in enumerate(zip(cols, variations, analyses)):
         with col:
-            st.markdown(f"**{day.strftime('%a')}**")
-            st.caption(day.strftime("%d/%m"))
-
-            # tarefas desse dia
-            day_tasks = [
-                t for t in st.session_state.tasks if t["date"] == day
-            ]
-            day_tasks.sort(key=lambda t: t["time"])
-
-            if not day_tasks:
-                st.caption("Sem tarefas.")
-            else:
-                for task in day_tasks:
-                    is_done = task["status"] == "done"
-                    bg_color = "#10451D" if is_done else "#111827"
-                    text_color = "#F9FAFB"
-
-                    st.markdown(
-                        f"""
-<div style="background:{bg_color}; color:{text_color}; padding:8px 10px; border-radius:12px; margin-bottom:8px; font-size:0.85rem;">
-  <div style="font-size:0.75rem; opacity:0.8;">{task['time']} · {task['platform'].capitalize()}</div>
-  <div style="font-weight:600; margin:4px 0;">{task['title']}</div>
-  <div style="font-size:0.75rem; opacity:0.8;">Score: {task['score']}/10</div>
-  <div style="font-size:0.75rem; margin-top:4px;">Estado: {"✅ Concluído" if is_done else "⏳ Pendente"}</div>
+            # Badge estilo B) – forte, destacado
+            if ctx["plan"] == "Pro" and idx == best_idx:
+                st.markdown(
+                    """
+<div style="
+    background-color:#facc15;
+    color:#111827;
+    padding:4px 10px;
+    border-radius:999px;
+    display:inline-block;
+    font-size:0.70rem;
+    font-weight:700;
+    letter-spacing:0.08em;
+    text-transform:uppercase;
+    margin-bottom:4px;
+">
+NOSSA RECOMENDAÇÃO ⭐
 </div>
 """,
+                    unsafe_allow_html=True,
+                )
+
+            title_with_emoji = add_emoji_to_title(var["titulo"], ctx["niche"])
+            st.markdown(f"### {title_with_emoji}")
+
+            st.write(var["legenda"])
+
+            if var["hashtags"]:
+                st.markdown("**Hashtags sugeridas:**")
+                st.write(" ".join(var["hashtags"]))
+
+            if ctx["plan"] == "Pro":
+                st.markdown(
+                    f"**Análise automática (Pro):** "
+                    f"🧠 Score {ana['score']}/10 · "
+                    f"💬 Engaj. {ana['engaj']}/10 · "
+                    f"💰 Conv. {ana['conv']}/10"
+                )
+            else:
+                st.markdown(
+                    "🔒 _Análise automática premium disponível apenas no plano Pro._"
+                )
+
+            st.markdown("---")
+
+            # Inputs para planner
+            day = st.date_input(
+                "Dia",
+                value=date.today(),
+                key=f"day_var_{idx}",
+            )
+            time_val = st.time_input(
+                "Hora",
+                value=datetime.strptime("18:00", "%H:%M").time(),
+                key=f"time_var_{idx}",
+            )
+
+            if st.button("➕ Adicionar ao planner", key=f"add_planner_{idx}"):
+                score = add_task_to_planner(var, day, time_val, ctx["niche"])
+                st.success(f"Adicionado ao planner com score estimado {score}/10.")
+
+
+# ==========================================
+# PÁGINA: PLANNER
+# ==========================================
+def page_planner(ctx):
+    st.subheader("📅 Planner semanal")
+
+    anchor = st.date_input("Semana de referência", value=date.today())
+    monday = anchor - timedelta(days=anchor.weekday())
+    week_days = [monday + timedelta(days=i) for i in range(7)]
+    names = ["Seg", "Ter", "Qua", "Qui", "Sex", "Sáb", "Dom"]
+
+    st.markdown(
+        f"Semana de **{week_days[0].strftime('%d/%m')}** "
+        f"a **{week_days[-1].strftime('%d/%m')}**"
+    )
+
+    cols = st.columns(7)
+    for col, name, day_dt in zip(cols, names, week_days):
+        with col:
+            st.markdown(f"**{name}**")
+            st.caption(day_dt.strftime("%d/%m"))
+
+            tasks = [
+                t for t in st.session_state.planner if t["dia"] == day_dt.isoformat()
+            ]
+            if not tasks:
+                st.caption("Sem tarefas.")
+            else:
+                for t in tasks:
+                    bg = "#111827" if t["status"] == "planned" else "#14532d"
+                    st.markdown(
+                        f"""
+<div style="border-radius:14px;padding:10px 12px;margin-top:8px;background-color:{bg};color:#e5e7eb;">
+  <div style="font-size:0.8rem;opacity:0.7;">{t['hora']} · {t['plataforma']}</div>
+  <div style="font-weight:600;margin-top:4px;">{t['titulo']}</div>
+  <div style="font-size:0.8rem;margin-top:4px;">Score: {t['score']}/10 {'✅' if t['status']=='done' else ''}</div>
+</div>
+                        """,
                         unsafe_allow_html=True,
                     )
+                    b1, b2 = st.columns(2)
+                    with b1:
+                        if st.button("👁 Ver detalhes", key=f"det_{t['id']}"):
+                            st.session_state.selected_task_id = t["id"]
+                    with b2:
+                        if t["status"] != "done":
+                            if st.button("✅ Concluir", key=f"done_{t['id']}"):
+                                t["status"] = "done"
+                        else:
+                            st.caption("✅ Já concluído")
 
-                    btn_cols = st.columns(2)
-                    with btn_cols[0]:
-                        if st.button(
-                            "👁 Ver detalhes",
-                            key=f"detail_{task['id']}",
-                        ):
-                            st.session_state.selected_task_id = task["id"]
-                    with btn_cols[1]:
-                        if st.button(
-                            "✅ Concluir",
-                            key=f"done_{task['id']}",
-                            disabled=is_done,
-                        ):
-                            task["status"] = "done"
-                            st.session_state.selected_task_id = task["id"]
-
-    # Detalhes da tarefa seleccionada
+    # Detalhes em baixo
     if st.session_state.selected_task_id is not None:
-        st.markdown("---")
         task = next(
-            (t for t in st.session_state.tasks if t["id"] == st.session_state.selected_task_id),
+            (t for t in st.session_state.planner if t["id"] == st.session_state.selected_task_id),
             None,
         )
         if task:
-            st.markdown("### 🔍 Detalhes da tarefa selecionada")
-            st.markdown(f"**{task['title']}**")
-            st.caption(
-                f"{task['date'].strftime('%d/%m/%Y')} · {task['time']} · {task['platform'].capitalize()}"
-            )
-            st.write(task["caption"])
+            st.markdown("---")
+            st.markdown("### 🔎 Detalhes da tarefa selecionada")
 
+            st.markdown(f"**{task['titulo']}**")
+            st.caption(
+                f"{task['dia']} · {task['hora']} · "
+                f"{task['plataforma']} · Score {task['score']}/10"
+            )
+            st.write(task["legenda"])
             if task["hashtags"]:
                 st.markdown("**Hashtags:**")
                 st.write(" ".join(task["hashtags"]))
 
-            st.markdown("#### Estado atual:")
-            if task["status"] == "done":
-                st.success("Concluído ✅")
-            else:
-                st.info("Pendente ⏳")
+            st.markdown(
+                f"**Estado atual:** {'✅ Concluído' if task['status']=='done' else '🕒 Pendente'}"
+            )
 
             c1, c2, c3 = st.columns(3)
             with c1:
-                if st.button(
-                    "✅ Marcar como concluído",
-                    key=f"detail_done_{task['id']}",
-                    disabled=task["status"] == "done",
-                ):
-                    task["status"] = "done"
+                if task["status"] != "done":
+                    if st.button("✅ Marcar como concluído", key=f"detail_done_{task['id']}"):
+                        task["status"] = "done"
             with c2:
-                if st.button("🗑 Remover do planner", key=f"remove_{task['id']}"):
-                    st.session_state.tasks = [
-                        t for t in st.session_state.tasks if t["id"] != task["id"]
+                if st.button("🗑 Remover do planner", key=f"detail_remove_{task['id']}"):
+                    st.session_state.planner = [
+                        t for t in st.session_state.planner if t["id"] != task["id"]
                     ]
                     st.session_state.selected_task_id = None
             with c3:
-                if st.button("❌ Fechar detalhes", key=f"close_detail_{task['id']}"):
+                if st.button("Fechar detalhes", key=f"detail_close_{task['id']}"):
                     st.session_state.selected_task_id = None
 
 
-# ---------- PÁGINA PERFORMANCE ----------
+# ==========================================
+# PÁGINA: PERFORMANCE
+# ==========================================
 def page_performance(ctx):
-    st.markdown("### 📊 Performance (v9.3)")
+    st.subheader("📊 Performance")
 
     if ctx["plan"] != "Pro":
-        st.warning(
-            "🔒 Disponível no plano Pro. Desbloqueia métricas e previsões avançadas."
+        st.warning("🔒 A aba Performance completa está disponível apenas no plano Pro.")
+        return
+
+    completed = [t for t in st.session_state.planner if t["status"] == "done"]
+
+    if not completed:
+        st.info(
+            "Ainda não tens posts concluídos no planner. "
+            "Marca algumas tarefas como concluídas para veres as métricas."
         )
         return
 
-    completed = [t for t in st.session_state.tasks if t["status"] == "done"]
+    scores = [t["score"] for t in completed]
+    avg_score = mean(scores)
 
-    posts_concluidos = len(completed)
-    if completed:
-        score_medio = round(mean(t["score"] for t in completed), 2)
-        # Hora recomendada: média das horas concluídas
-        minutos = [parse_time_to_minutes(t["time"]) for t in completed]
-        media_min = int(mean(minutos))
-        hora_rec = minutes_to_time_str(media_min)
+    # Hora recomendada = média das horas
+    minutes_list = []
+    for t in completed:
+        try:
+            h, m = map(int, t["hora"].split(":"))
+            minutes_list.append(h * 60 + m)
+        except Exception:
+            continue
+    if minutes_list:
+        avg_min = int(round(mean(minutes_list) / 15) * 15)
+        hr = (avg_min // 60) % 24
+        mn = avg_min % 60
+        recommended_hour = f"{hr:02d}:{mn:02d}"
     else:
-        score_medio = 0.0
-        hora_rec = "--:--"
+        recommended_hour = "18:00"
 
-    k1, k2, k3 = st.columns(3)
-    with k1:
-        st.metric("Posts concluídos", posts_concluidos)
-    with k2:
-        st.metric("Score médio da IA", score_medio)
-    with k3:
-        st.metric("Hora recomendada", hora_rec)
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.metric("Posts concluídos", len(completed))
+    with c2:
+        st.metric("Score médio da IA", f"{avg_score:.2f}")
+    with c3:
+        st.metric("Hora recomendada", recommended_hour)
 
     st.caption("🧠 Precisão da IA aumenta com o nº de postagens concluídas.")
 
     st.markdown("---")
     st.markdown("#### Últimos posts concluídos")
 
-    if not completed:
-        st.write("Ainda não tens posts concluídos no planner.")
-        return
-
-    # ordenar do mais recente para o mais antigo
     completed_sorted = sorted(
-        completed, key=lambda t: t["date"].isoformat() + t["time"], reverse=True
-    )
+        completed, key=lambda t: (t["dia"], t["hora"]), reverse=True
+    )[:10]
 
     for t in completed_sorted:
         st.markdown(
-            f"- **{t['date'].strftime('%d/%m %H:%M')} · {t['platform'].capitalize()}** — "
-            f"{t['title']}  · Score: {t['score']}/10 · Estado: ✅ Concluído"
+            f"- **{t['dia']} {t['hora']} · {t['plataforma']}** — "
+            f"{t['titulo']} · Score: {t['score']}/10 · Estado: ✅ Concluído"
         )
 
 
-# ---------- MAIN ----------
+# ==========================================
+# MAIN
+# ==========================================
 def main():
+    init_state()
     ctx = sidebar()
 
-    st.markdown(
-        f"## ContentForge v9.3 🍏\n"
-        "Gera conteúdo inteligente, organiza num planner semanal e, no plano Pro, acompanha a força de cada publicação."
+    st.title("ContentForge v9.5 🍏")
+    st.caption(
+        "Gera conteúdo inteligente, organiza num planner semanal e, no plano Pro, "
+        "acompanha a força de cada publicação."
     )
 
-    nav()
+    tab_gen, tab_planner, tab_perf = st.tabs(
+        ["⚡ Gerar", "📅 Planner", "📊 Performance"]
+    )
 
-    if st.session_state.active_page == "gerar":
-        page_gerar(ctx)
-    elif st.session_state.active_page == "planner":
+    with tab_gen:
+        page_generate(ctx)
+
+    with tab_planner:
         page_planner(ctx)
-    elif st.session_state.active_page == "performance":
+
+    with tab_perf:
         page_performance(ctx)
 
 
