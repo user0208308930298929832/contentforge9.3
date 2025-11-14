@@ -610,48 +610,158 @@ with tabs[1]:
 
 
 # -----------------------------
-# ABA 3 – PERFORMANCE (BASE P/ ANALYTICS)
+# ABA 3 – PERFORMANCE PREMIUM (v10)
 # -----------------------------
 with tabs[2]:
-    st.markdown("### 📊 Performance (v9.3)")
+    st.markdown("### 📊 Performance Pro – Analytics Inteligentes")
 
     if plano != "Pro":
         st.markdown(
             """
             <div class="cf-badge-lock">
-            🔒 Disponível no plano Pro. Desbloqueia métricas, previsões e recomendações de horário.
+            🔒 Disponível no plano Pro. Desbloqueia métricas avançadas, previsões e insights inteligentes.
             </div>
             """,
             unsafe_allow_html=True,
         )
-        st.info("Altera o plano na barra lateral para 'Pro' para ver a aba Performance completa.")
+        st.info("Altera o plano na barra lateral para 'Pro' para aceder ao dashboard completo de performance.")
     else:
         concluidos = [it for it in st.session_state.planner_items if it["status"] == "done"]
+        planeados_total = len(st.session_state.planner_items)
 
         if not concluidos:
-            st.info("Ainda não tens posts marcados como concluídos. Marca um post como concluído no planner para começar.")
+            st.info("Ainda não tens posts marcados como concluídos. Marca pelo menos 1 tarefa como concluída no Planner para começar a ver analytics.")
         else:
-            scores = [it["score"] for it in concluidos]
+            # ---------------- KPI CARDS ----------------
+            scores = [float(it["score"]) for it in concluidos if isinstance(it.get("score"), (int, float, str))]
+            scores = [float(s) for s in scores]
             media_score = round(statistics.mean(scores), 2) if scores else 0.0
 
+            # consistência: concluídos / planeados
+            consistencia = 0.0
+            if planeados_total > 0:
+                consistencia = round((len(concluidos) / planeados_total) * 100, 1)
+
+            # hora recomendada (mais frequente entre as concluídas)
             horas = [it["time"].strftime("%H:00") for it in concluidos]
-            hora_recomendada = max(set(horas), key=horas.count)
+            if horas:
+                hora_recomendada = max(set(horas), key=horas.count)
+            else:
+                hora_recomendada = "18:00"
 
             col1, col2, col3 = st.columns(3)
             with col1:
-                st.metric("Posts concluídos", len(concluidos))
+                st.metric("Score médio da IA", f"{media_score}/10")
+                st.caption("Média das últimas publicações concluídas.")
             with col2:
-                st.metric("Score médio da IA", media_score)
+                st.metric("Consistência semanal", f"{consistencia}%")
+                st.caption("Posts concluídos vs. planeados.")
             with col3:
                 st.metric("Hora recomendada", hora_recomendada)
+                st.caption("Baseado nos teus posts concluídos.")
 
             st.markdown(
-                '<div class="cf-subtle">⚙️ Precisão da IA aumenta com o nº de postagens concluídas.</div>',
+                '<div class="cf-subtle">🧠 A precisão destas métricas aumenta com o número de postagens concluídas.</div>',
                 unsafe_allow_html=True,
             )
 
             st.markdown("---")
-            st.markdown("#### Últimos posts concluídos")
+
+            # ---------------- GRÁFICO – EVOLUÇÃO DA FORÇA ----------------
+            st.markdown("#### 📈 Evolução da força das tuas publicações")
+
+            concluidos_sorted = sorted(
+                concluidos,
+                key=lambda x: (x["date"], x["time"]),
+            )
+
+            chart_scores = [it["score"] for it in concluidos_sorted]
+            chart_labels = [it["date"].strftime("%d/%m") for it in concluidos_sorted]
+
+            # streamlit aceita listas simples; eixo X será o índice (1,2,3...)
+            st.line_chart(chart_scores)
+            st.caption("Cada ponto representa o score de uma publicação concluída, ao longo do tempo.")
+
+            st.markdown("---")
+
+            # ---------------- INSIGHTS INTELIGENTES ----------------
+            st.markdown("#### ✨ Insights inteligentes da IA")
+
+            # melhor e pior post por score
+            best_post = max(concluidos, key=lambda x: x["score"])
+            worst_post = min(concluidos, key=lambda x: x["score"])
+
+            # plataforma com melhor performance
+            plataformas = {}
+            for it in concluidos:
+                plataformas.setdefault(it["plataforma"], []).append(it["score"])
+            melhor_plat = None
+            melhor_plat_score = 0.0
+            for plat, vals in plataformas.items():
+                m = statistics.mean(vals)
+                if m > melhor_plat_score:
+                    melhor_plat_score = m
+                    melhor_plat = plat
+
+            col_ins1, col_ins2 = st.columns(2)
+            with col_ins1:
+                st.markdown("**🔥 Insight #1 – Tipo de conteúdo forte**")
+                st.write(
+                    f"O teu melhor post foi em **{best_post['plataforma'].capitalize()}** "
+                    f"a {best_post['date'].strftime('%d/%m')} às {best_post['time'].strftime('%H:%M')} "
+                    f"com score **{best_post['score']}/10**."
+                )
+                st.write("A estrutura deste post é uma boa referência para novos conteúdos.")
+
+                st.markdown("**📉 Insight #2 – O que evitar**")
+                st.write(
+                    f"O post com menor score foi em **{worst_post['plataforma'].capitalize()}** "
+                    f"a {worst_post['date'].strftime('%d/%m')} às {worst_post['time'].strftime('%H:%M')} "
+                    f"com score **{worst_post['score']}/10**."
+                )
+                st.write("Evita repetir o mesmo tipo de abordagem sem ajustares o copy ou o hook inicial.")
+
+            with col_ins2:
+                st.markdown("**📢 Insight #3 – Plataforma em alta**")
+                if melhor_plat:
+                    st.write(
+                        f"A plataforma com melhor performance média é **{melhor_plat.capitalize()}** "
+                        f"com score médio aproximado de **{round(melhor_plat_score, 1)}/10**."
+                    )
+                else:
+                    st.write("Ainda não há dados suficientes para comparar plataformas.")
+
+                st.markdown("**⏱ Insight #4 – Janela horária forte**")
+                if horas:
+                    st.write(
+                        f"A maior concentração de posts concluídos está por volta das **{hora_recomendada}**. "
+                        "Tens boas probabilidades de manter esta hora como base para próximos conteúdos."
+                    )
+                else:
+                    st.write("Assim que tiveres mais posts concluídos, sugerimos uma hora mais precisa para publicar.")
+
+            st.markdown("---")
+
+            # ---------------- PREVISÃO PRO – O QUE POSTAR A SEGUIR ----------------
+            st.markdown("#### 🔮 Previsão Pro – O que postar a seguir")
+
+            sugestao_tema = "benefício direto + prova social"
+            if melhor_plat == "instagram":
+                sugestao_tema = "carrossel educativo com foco em valor e CTA para o link na bio"
+            elif melhor_plat == "tiktok":
+                sugestao_tema = "vídeo curto com hook forte nos primeiros 3 segundos e CTA para seguir a página"
+
+            st.write(
+                f"Com base nos posts que já concluíste, a IA sugere que o teu próximo conteúdo seja em "
+                f"**{(melhor_plat or 'Instagram').capitalize()}**, publicado por volta das **{hora_recomendada}**, "
+                f"com foco em **{sugestao_tema}**."
+            )
+            st.caption("Esta previsão é aproximada e melhora à medida que completas mais tarefas no planner.")
+
+            st.markdown("---")
+
+            # ---------------- ÚLTIMOS POSTS CONCLUÍDOS ----------------
+            st.markdown("#### 🧾 Últimos posts concluídos")
 
             for it in sorted(concluidos, key=lambda x: (x["date"], x["time"]), reverse=True)[:10]:
                 st.markdown(
@@ -659,3 +769,9 @@ with tabs[2]:
                     f"{it['plataforma'].capitalize()}** — {it['titulo']}  \n"
                     f"Score: **{it['score']}/10** · Estado: ✅ Concluído"
                 )
+
+            st.markdown(
+                '<div class="cf-subtle">🧠 A IA está a aprender contigo. Quanto mais publicares e concluires no planner, '
+                'mais precisas serão as previsões e insights.</div>',
+                unsafe_allow_html=True,
+            )
